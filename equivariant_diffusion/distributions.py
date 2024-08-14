@@ -15,6 +15,8 @@ class PositionFeaturePrior(torch.nn.Module):
         self.in_node_nf = in_node_nf
 
     def forward(self, z_x, z_h, node_mask=None):
+        if node_mask:
+            node_mask = (node_mask > 0).to(int)
         assert len(z_x.size()) == 3
         assert len(node_mask.size()) == 3
         assert node_mask.size()[:2] == z_x.size()[:2]

@@ -1,15 +1,15 @@
-# Rdkit import should be first, do not move it
-try:
-    from rdkit import Chem
-except ModuleNotFoundError:
-    pass
+"""
+hack geoldm to use ab 
+"""
+
 import copy
 import utils
 import argparse
 import wandb
-from configs.datasets_config import get_dataset_info
+# from configs.datasets_config import get_dataset_info
+import os
 from os.path import join
-from qm9 import dataset
+# from qm9 import dataset
 from qm9.models import get_optim, get_model, get_autoencoder, get_latent_diffusion
 from equivariant_diffusion import en_diffusion
 from equivariant_diffusion.utils import assert_correctly_masked
@@ -17,8 +17,46 @@ from equivariant_diffusion import utils as flow_utils
 import torch
 import time
 import pickle
-from qm9.utils import prepare_context, compute_mean_mad
+# from qm9.utils import prepare_context, compute_mean_mad
 from train_test import train_epoch, test, analyze_and_save
+from torch.utils.data import DataLoader
+
+####################### START DIFFAB HACK #######################################
+# Tap into diffab
+import sys
+sys.path.append('/data/rdilip/diffab/')
+import yaml
+from diffab.datasets import get_dataset
+from diffab.utils.data import PaddingCollate
+cfg = yaml.safe_load(open('/data/rdilip/diffab/configs/test/codesign_single.yml'))
+
+def inf_iterator(iterable):
+    iterator = iterable.__iter__()
+    while True:
+        try:
+            yield iterator.__next__()
+        except StopIteration:
+            iterator = iterable.__iter__()
+
+class dotdict(dict):
+    """dot.notation access to dictionary attributes"""
+    __getattr__ = dict.get
+    __setattr__ = dict.__setitem__
+    __delattr__ = dict.__delitem__
+    
+cfg_test = dotdict(cfg['dataset']['test'])
+cfg_test.chothia_dir = '/data/rdilip/diffab/data/all_structures/chothia'
+cfg_test.summary_path = '/data/rdilip/diffab/data/sabdab_summary_all.tsv'
+
+cfg = yaml.safe_load(open('/data/rdilip/diffab/configs/train/codesign_single.yml'))
+cfg_train = dotdict(cfg['dataset']['train'])
+cfg_train.chothia_dir = '/data/rdilip/diffab/data/all_structures/chothia'
+cfg_train.summary_path = '/data/rdilip/diffab/data/sabdab_summary_all.tsv'
+
+ds_train = get_dataset(cfg_train)
+ds_test = get_dataset(cfg_test)
+
+####################### END DIFFAB HACK #######################################
 
 parser = argparse.ArgumentParser(description='E3Diffusion')
 parser.add_argument('--exp_name', type=str, default='debug_10')
@@ -104,6 +142,7 @@ parser.add_argument('--save_model', type=eval, default=True,
                     help='save model')
 parser.add_argument('--generate_epochs', type=int, default=1,
                     help='save model')
+parser.add_argument('--shuffle', type=bool, default=True)
 parser.add_argument('--num_workers', type=int, default=0, help='Number of worker for the dataloader')
 parser.add_argument('--test_epochs', type=int, default=10)
 parser.add_argument('--data_augmentation', type=eval, default=False, help='use attention in the EGNN')
@@ -122,7 +161,7 @@ parser.add_argument('--n_stability_samples', type=int, default=500,
 parser.add_argument('--normalize_factors', type=eval, default=[1, 4, 1],
                     help='normalize factors for [x, categorical, integer]')
 parser.add_argument('--remove_h', action='store_true')
-parser.add_argument('--include_charges', type=eval, default=True,
+parser.add_argument('--include_charges', type=eval, default=False,
                     help='include atom charge or not')
 parser.add_argument('--visualize_every_batch', type=int, default=1e8,
                     help="Can be used to visualize multiple times per epoch")
@@ -131,11 +170,10 @@ parser.add_argument('--normalization_factor', type=float, default=1,
 parser.add_argument('--aggregation_method', type=str, default='sum',
                     help='"sum" or "mean"')
 args = parser.parse_args()
+# dataset_info = get_dataset_info(args.dataset, args.remove_h)
+import pickle
+dataset_info = pickle.load(open('ds_info.pkl', 'rb'))
 
-dataset_info = get_dataset_info(args.dataset, args.remove_h)
-
-atom_encoder = dataset_info['atom_encoder']
-atom_decoder = dataset_info['atom_decoder']
 
 # args, unparsed_args = parser.parse_known_args()
 args.wandb_usr = utils.get_wandb_username(args.wandb_usr)
@@ -185,19 +223,23 @@ kwargs = {'entity': args.wandb_usr, 'name': args.exp_name, 'project': 'e3_diffus
 # wandb.save('*.txt')
 
 # Retrieve QM9 dataloaders
-dataloaders, charge_scale = dataset.retrieve_dataloaders(args)
+# dataloaders, charge_scale = dataset.retrieve_dataloaders(args)
+dataloaders = {
+    'train': DataLoader(
+                    ds_train, batch_size=args.batch_size, collate_fn=PaddingCollate(), 
+                    shuffle=args.shuffle,
+                    num_workers=args.num_workers, ),
+    
+    'test': DataLoader(
+                    ds_test, batch_size=args.batch_size, collate_fn=PaddingCollate(), 
+                    shuffle=False, num_workers=args.num_workers, )
+}
 
 data_dummy = next(iter(dataloaders['train']))
 
-if len(args.conditioning) > 0:
-    print(f'Conditioning on {args.conditioning}')
-    property_norms = compute_mean_mad(dataloaders, args.conditioning, args.dataset)
-    context_dummy = prepare_context(args.conditioning, data_dummy, property_norms)
-    context_node_nf = context_dummy.size(2)
-else:
-    context_node_nf = 0
-    property_norms = None
-
+# no conditioning
+context_node_nf = 0
+property_norms = None
 args.context_node_nf = context_node_nf
 
 # Create Latent Diffusion Model or Audoencoder
@@ -266,7 +308,7 @@ def main():
 
         if epoch % args.test_epochs == 0:
             if isinstance(model, en_diffusion.EnVariationalDiffusion):
-                print("running diffusion")
+                print("Running variational diffusion model")
                 # wandb.log(model.log_info(), commit=True)
 
             if not args.break_train_epoch and args.train_diffusion:

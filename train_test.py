@@ -10,6 +10,7 @@ import qm9.utils as qm9utils
 from qm9 import losses
 import time
 import torch
+from utils_diffab import batched_diffab_to_geoldm
 
 
 def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dtype, property_norms, optim,
@@ -18,12 +19,16 @@ def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dt
     model.train()
     nll_epoch = []
     n_iterations = len(loader)
+
     for i, data in enumerate(loader):
+        data = batched_diffab_to_geoldm(data)
         x = data['positions'].to(device, dtype)
         node_mask = data['atom_mask'].to(device, dtype).unsqueeze(2)
         edge_mask = data['edge_mask'].to(device, dtype)
         one_hot = data['one_hot'].to(device, dtype)
         charges = (data['charges'] if args.include_charges else torch.zeros(0)).to(device, dtype)
+
+        generate_flag = data['generate_flag'].to(device, dtype) if 'generate_flag' in data else None
 
         x = remove_mean_with_mask(x, node_mask)
 
@@ -51,7 +56,8 @@ def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dt
 
         # transform batch through flow
         nll, reg_term, mean_abs_z = losses.compute_loss_and_nll(args, model_dp, nodes_dist,
-                                                                x, h, node_mask, edge_mask, context)
+                                                                x, h, node_mask, edge_mask, context,
+                                                                generate_flag=generate_flag)
         # standard nll from forward KL
         loss = nll + args.ode_regularization * reg_term
         loss.backward()
@@ -88,10 +94,10 @@ def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dt
             if len(args.conditioning) > 0:
                 vis.visualize_chain("outputs/%s/epoch_%d/conditional/" % (args.exp_name, epoch), dataset_info,
                                     wandb=wandb, mode='conditional')
-        wandb.log({"Batch NLL": nll.item()}, commit=True)
+        # wandb.log({"Batch NLL": nll.item()}, commit=True)
         if args.break_train_epoch:
             break
-    wandb.log({"Train Epoch NLL": np.mean(nll_epoch)}, commit=False)
+    # wandb.log({"Train Epoch NLL": np.mean(nll_epoch)}, commit=False)
 
 
 def check_mask_correct(variables, node_mask):
@@ -191,9 +197,9 @@ def analyze_and_save(epoch, model_sample, nodes_dist, args, device, dataset_info
     molecules = {key: torch.cat(molecules[key], dim=0) for key in molecules}
     validity_dict, rdkit_tuple = analyze_stability_for_molecules(molecules, dataset_info)
 
-    wandb.log(validity_dict)
-    if rdkit_tuple is not None:
-        wandb.log({'Validity': rdkit_tuple[0][0], 'Uniqueness': rdkit_tuple[0][1], 'Novelty': rdkit_tuple[0][2]})
+    # wandb.log(validity_dict)
+    # if rdkit_tuple is not None:
+        # wandb.log({'Validity': rdkit_tuple[0][0], 'Uniqueness': rdkit_tuple[0][1], 'Novelty': rdkit_tuple[0][2]})
     return validity_dict
 
 

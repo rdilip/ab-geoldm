@@ -428,6 +428,7 @@ class EnVariationalDiffusion(torch.nn.Module):
         kl_distance_h = gaussian_KL(mu_T_h, sigma_T_h, zeros, ones, node_mask)
 
         # Compute KL for x-part.
+
         zeros, ones = torch.zeros_like(mu_T_x), torch.ones_like(sigma_T_x)
         subspace_d = self.subspace_dimensionality(node_mask)
         kl_distance_x = gaussian_KL_for_dimension(mu_T_x, sigma_T_x, zeros, ones, d=subspace_d)
@@ -565,7 +566,7 @@ class EnVariationalDiffusion(torch.nn.Module):
 
         return log_p_xh_given_z
 
-    def compute_loss(self, x, h, node_mask, edge_mask, context, t0_always):
+    def compute_loss(self, x, h, node_mask, edge_mask, context, t0_always, generate_flag=None):
         """Computes an estimator for the variational lower bound, or the simple loss (MSE)."""
 
         # This part is about whether to include loss term 0 always.
@@ -597,14 +598,19 @@ class EnVariationalDiffusion(torch.nn.Module):
         sigma_t = self.sigma(gamma_t, x)
 
         # Sample zt ~ Normal(alpha_t x, sigma_t)
+
+        # NOTE: I think this works. node_mask=1 if there's a real node. Multiply by 
+        # generate flag means it must be a real node and be one that we want to noise.
         eps = self.sample_combined_position_feature_noise(
-            n_samples=x.size(0), n_nodes=x.size(1), node_mask=node_mask)
+            n_samples=x.size(0), n_nodes=x.size(1), node_mask=(node_mask * generate_flag.to(int))
+        )
 
         # Concatenate x, h[integer] and h[categorical].
         xh = torch.cat([x, h['categorical'], h['integer']], dim=2)
         # Sample z_t given x, h for timestep t, from q(z_t | x, h)
         z_t = alpha_t * xh + sigma_t * eps
 
+        # NOTE: we can probably deal with the memory a bit better here.
         diffusion_utils.assert_mean_zero_with_mask(z_t[:, :, :self.n_dims], node_mask)
 
         # Neural net prediction.
@@ -1133,7 +1139,7 @@ class EnLatentDiffusion(EnVariationalDiffusion):
 
         return log_p_xh_given_z
     
-    def forward(self, x, h, node_mask=None, edge_mask=None, context=None):
+    def forward(self, x, h, node_mask=None, edge_mask=None, context=None, generate_flag=None):
         """
         Computes the loss (type l2 or NLL) if training. And if eval then always computes NLL.
         """
@@ -1173,10 +1179,10 @@ class EnLatentDiffusion(EnVariationalDiffusion):
 
         if self.training:
             # Only 1 forward pass when t0_always is False.
-            loss_ld, loss_dict = self.compute_loss(z_x, z_h, node_mask, edge_mask, context, t0_always=False)
+            loss_ld, loss_dict = self.compute_loss(z_x, z_h, node_mask, edge_mask, context, t0_always=False, generate_flag=generate_flag)
         else:
             # Less variance in the estimator, costs two forward passes.
-            loss_ld, loss_dict = self.compute_loss(z_x, z_h, node_mask, edge_mask, context, t0_always=True)
+            loss_ld, loss_dict = self.compute_loss(z_x, z_h, node_mask, edge_mask, context, t0_always=True, generate_flag=generate_flag)
         
         # The _constants_ depending on sigma_0 from the
         # cross entropy term E_q(z0 | x) [log p(x | z0)].
