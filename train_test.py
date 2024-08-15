@@ -28,7 +28,7 @@ def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dt
         one_hot = data['one_hot'].to(device, dtype)
         charges = (data['charges'] if args.include_charges else torch.zeros(0)).to(device, dtype)
 
-        generate_flag = data['generate_flag'].to(device, dtype) if 'generate_flag' in data else None
+        generate_mask = data['generate_flag'].to(device, dtype) if 'generate_flag' in data else None
 
         x = remove_mean_with_mask(x, node_mask)
 
@@ -57,7 +57,7 @@ def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dt
         # transform batch through flow
         nll, reg_term, mean_abs_z = losses.compute_loss_and_nll(args, model_dp, nodes_dist,
                                                                 x, h, node_mask, edge_mask, context,
-                                                                generate_flag=generate_flag)
+                                                                generate_mask=generate_mask)
         # standard nll from forward KL
         loss = nll + args.ode_regularization * reg_term
         loss.backward()

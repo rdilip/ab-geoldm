@@ -181,19 +181,24 @@ class EGNN(nn.Module):
                                                                aggregation_method=self.aggregation_method))
         self.to(self.device)
 
-    def forward(self, h, x, edge_index, node_mask=None, edge_mask=None):
+    def forward(self, h, x, edge_index, node_mask=None, edge_mask=None, generate_mask=None):
         # Edit Emiel: Remove velocity as input
         distances, _ = coord2diff(x, edge_index)
         if self.sin_embedding is not None:
             distances = self.sin_embedding(distances)
+        if generate_mask is None:
+            print("no generate mask")
+            generate_mask = torch.ones_like(node_mask)
         h = self.embedding(h)
         for i in range(0, self.n_layers):
             h, x = self._modules["e_block_%d" % i](h, x, edge_index, node_mask=node_mask, edge_mask=edge_mask, edge_attr=distances)
 
+        # we need to CHECK THIS
+        x = x * (node_mask * generate_mask)
         # Important, the bias of the last linear might be non-zero
         h = self.embedding_out(h)
         if node_mask is not None:
-            h = h * node_mask
+            h = h * (node_mask * generate_mask)
         return h, x
 
 

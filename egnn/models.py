@@ -46,7 +46,7 @@ class EGNN_dynamics_QM9(nn.Module):
     def unwrap_forward(self):
         return self._forward
 
-    def _forward(self, t, xh, node_mask, edge_mask, context):
+    def _forward(self, t, xh, node_mask, edge_mask, context, generate_mask):
         bs, n_nodes, dims = xh.shape
         h_dims = dims - self.n_dims
         edges = self.get_adj_matrix(n_nodes, bs, self.device)
@@ -54,6 +54,7 @@ class EGNN_dynamics_QM9(nn.Module):
         node_mask = node_mask.view(bs*n_nodes, 1)
         edge_mask = edge_mask.view(bs*n_nodes*n_nodes, 1)
         xh = xh.view(bs*n_nodes, -1).clone() * node_mask
+        generate_mask = generate_mask.view(bs*n_nodes, 1)
         x = xh[:, 0:self.n_dims].clone()
         if h_dims == 0:
             h = torch.ones(bs*n_nodes, 1).to(self.device)
@@ -76,11 +77,11 @@ class EGNN_dynamics_QM9(nn.Module):
             h = torch.cat([h, context], dim=1)
 
         if self.mode == 'egnn_dynamics':
-            h_final, x_final = self.egnn(h, x, edges, node_mask=node_mask, edge_mask=edge_mask)
+            h_final, x_final = self.egnn(h, x, edges, node_mask=node_mask, edge_mask=edge_mask, generate_mask=generate_mask)
             vel = (x_final - x) * node_mask  # This masking operation is redundant but just in case
         elif self.mode == 'gnn_dynamics':
             xh = torch.cat([x, h], dim=1)
-            output = self.gnn(xh, edges, node_mask=node_mask)
+            output = self.gnn(xh, edges, node_mask=node_mask, generate_mask=generate_mask)
             vel = output[:, 0:3] * node_mask
             h_final = output[:, 3:]
 

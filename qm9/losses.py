@@ -10,13 +10,13 @@ def assert_correctly_masked(variable, node_mask):
     assert (variable * (1 - node_mask)).abs().sum().item() < 1e-8
 
 
-def compute_loss_and_nll(args, generative_model, nodes_dist, x, h, node_mask, edge_mask, context, generate_flag=None):
+def compute_loss_and_nll(args, generative_model, nodes_dist, x, h, node_mask, edge_mask, context, generate_mask=None):
     """ Generate flag allows us ot not try to regenerate the entire thing so we can provide a framework region
     """
     bs, n_nodes, n_dims = x.size()
 
-    if generate_flag is None:
-        generate_flag = node_mask
+    if generate_mask is None:
+        generate_mask = torch.ones_like(node_mask)
 
 
     if args.probabilistic_model == 'diffusion':
@@ -26,11 +26,11 @@ def compute_loss_and_nll(args, generative_model, nodes_dist, x, h, node_mask, ed
 
         # Here x is a position tensor, and h is a dictionary with keys
         # 'categorical' and 'integer'.
-        nll = generative_model(x, h, node_mask, edge_mask, context, generate_flag=generate_flag)
+        nll = generative_model(x, h, node_mask, edge_mask, context, generate_mask=generate_mask)
 
 
         # we only do diffusion on the masked CDRs.
-        N = (node_mask * generate_flag).squeeze(2).sum(1).long()
+        N = (node_mask * generate_mask).squeeze(2).sum(1).long()
 
         try:
             log_pN = nodes_dist.log_prob(N)

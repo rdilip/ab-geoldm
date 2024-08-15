@@ -89,7 +89,7 @@ class E_GCL(nn.Module):
         coord = coord + agg
         return coord
 
-    def forward(self, h, edge_index, coord, edge_attr=None, node_attr=None, node_mask=None, edge_mask=None):
+    def forward(self, h, edge_index, coord, edge_attr=None, node_attr=None, node_mask=None, edge_mask=None, generate_mask=None):
         row, col = edge_index
         radial, coord_diff = self.coord2radial(edge_index, coord)
 
@@ -101,8 +101,13 @@ class E_GCL(nn.Module):
         # x = self.node_model(x, edge_index, x[col], u, batch)  # GCN
 
         if node_mask is not None:
-            h = h * node_mask
-            coord = coord * node_mask
+            mask = node_mask
+            if generate_mask is not None:
+                mask = (mask * generate_mask).to(int)
+            # h = h * node_mask
+            # coord = coord * node_mask
+            h = h * mask
+            coord = coord * mask
         return h, coord, edge_attr
 
     def coord2radial(self, edge_index, coord):
@@ -137,17 +142,21 @@ class EGNN(nn.Module):
 
         self.to(self.device)
 
-    def forward(self, h, x, edges, edge_attr=None, node_mask=None, edge_mask=None):
+    def forward(self, h, x, edges, edge_attr=None, node_mask=None, edge_mask=None, generate_mask=None):
         # Edit Emiel: Remove velocity as input
         edge_attr = torch.sum((x[edges[0]] - x[edges[1]]) ** 2, dim=1, keepdim=True)
         h = self.embedding(h)
         for i in range(0, self.n_layers):
-            h, x, _ = self._modules["gcl_%d" % i](h, edges, x, edge_attr=edge_attr, node_mask=node_mask, edge_mask=edge_mask)
+            h, x, _ = self._modules["gcl_%d" % i](h, edges, x, edge_attr=edge_attr, node_mask=node_mask, edge_mask=edge_mask, generate_mask=generate_mask)
         h = self.embedding_out(h)
 
         # Important, the bias of the last linear might be non-zero
         if node_mask is not None:
-            h = h * node_mask
+            mask = node_mask
+            if generate_mask is not None:
+                mask = (node_mask * generate_mask).to(int)
+            # h = h * node_mask
+            h = h * mask
         return h, x
 
 def unsorted_segment_sum(data, segment_ids, num_segments):
