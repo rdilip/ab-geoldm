@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from egnn.egnn_new import EGNN, GNN
-from equivariant_diffusion.utils import remove_mean, remove_mean_with_mask
+from equivariant_diffusion.utils import remove_mean, remove_mean_with_mask, assert_correctly_masked
 import numpy as np
 
 
@@ -78,7 +78,9 @@ class EGNN_dynamics_QM9(nn.Module):
 
         if self.mode == 'egnn_dynamics':
             h_final, x_final = self.egnn(h, x, edges, node_mask=node_mask, edge_mask=edge_mask, generate_mask=generate_mask)
-            vel = (x_final - x) * node_mask  # This masking operation is redundant but just in case
+            vel = (x_final - x) * (node_mask * generate_mask)  # This masking operation is redundant but just in case
+            assert_correctly_masked(h_final, node_mask * generate_mask)
+            assert_correctly_masked(x_final, node_mask * generate_mask)
         elif self.mode == 'gnn_dynamics':
             xh = torch.cat([x, h], dim=1)
             output = self.gnn(xh, edges, node_mask=node_mask, generate_mask=generate_mask)
@@ -87,6 +89,7 @@ class EGNN_dynamics_QM9(nn.Module):
 
         else:
             raise Exception("Wrong mode %s" % self.mode)
+
 
         if context is not None:
             # Slice off context size:
@@ -102,15 +105,21 @@ class EGNN_dynamics_QM9(nn.Module):
             print('Warning: detected nan, resetting EGNN output to zero.')
             vel = torch.zeros_like(vel)
 
+
+
         if node_mask is None:
             vel = remove_mean(vel)
         else:
             vel = remove_mean_with_mask(vel, node_mask.view(bs, n_nodes, 1))
 
+        # Rohit added this
+        vel = vel * (node_mask * generate_mask).view(bs, n_nodes, -1)
+
         if h_dims == 0:
             return vel
         else:
             h_final = h_final.view(bs, n_nodes, -1)
+            assert_correctly_masked(torch.cat([vel, h_final], dim=2), (node_mask * generate_mask).view(bs, n_nodes, -1))
             return torch.cat([vel, h_final], dim=2)
 
     def get_adj_matrix(self, n_nodes, batch_size, device):
