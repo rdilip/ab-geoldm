@@ -157,6 +157,7 @@ class EGNN(nn.Module):
                 mask = (node_mask * generate_mask).to(int)
             # h = h * node_mask
             h = h * mask
+            x = x * (node_mask * mask)
         return h, x
 
 def unsorted_segment_sum(data, segment_ids, num_segments):

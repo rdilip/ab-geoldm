@@ -78,9 +78,11 @@ class EGNN_dynamics_QM9(nn.Module):
 
         if self.mode == 'egnn_dynamics':
             h_final, x_final = self.egnn(h, x, edges, node_mask=node_mask, edge_mask=edge_mask, generate_mask=generate_mask)
-            vel = (x_final - x) * (node_mask * generate_mask)  # This masking operation is redundant but just in case
-            assert_correctly_masked(h_final, node_mask * generate_mask)
-            assert_correctly_masked(x_final, node_mask * generate_mask)
+            # We mask out everything but the CDR region here. But that's NOT the same as setting node_mask to generate_mask,
+            # because we sitll want eveyrthing else as context
+            vel = (x_final - x) * (generate_mask)
+            assert_correctly_masked(h_final, generate_mask)
+            assert_correctly_masked(x_final, generate_mask)
         elif self.mode == 'gnn_dynamics':
             xh = torch.cat([x, h], dim=1)
             output = self.gnn(xh, edges, node_mask=node_mask, generate_mask=generate_mask)
@@ -107,13 +109,17 @@ class EGNN_dynamics_QM9(nn.Module):
 
 
 
-        if node_mask is None:
-            vel = remove_mean(vel)
-        else:
-            vel = remove_mean_with_mask(vel, node_mask.view(bs, n_nodes, 1))
+        # if node_mask is None:
+            # vel = remove_mean(vel)
+        # else:
+            # vel = remove_mean_with_mask(vel, node_mask.view(bs, n_nodes, 1))
 
+        # remove mean just from generate_mask. everything else shoudl be zeor anyway
+        # it gets projected so this will be fine.
+        assert torch.isclose((vel * (1- generate_mask.view(bs, n_nodes, 1).to(int))).abs().max(), torch.tensor(0.0))
+        vel = remove_mean_with_mask(vel, generate_mask.view(bs, n_nodes, 1))
         # Rohit added this
-        vel = vel * (node_mask * generate_mask).view(bs, n_nodes, -1)
+        vel = vel * generate_mask.view(bs, n_nodes, -1)
 
         if h_dims == 0:
             return vel

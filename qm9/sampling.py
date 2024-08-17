@@ -6,6 +6,7 @@ from equivariant_diffusion.utils import assert_mean_zero_with_mask, remove_mean_
 from qm9.analyze import check_stability
 
 
+
 def rotate_chain(z):
     assert z.size(0) == 1
 
@@ -107,25 +108,36 @@ def sample_chain(args, device, flow, n_tries, dataset_info, prop_dist=None):
     return one_hot, charges, x
 
 
-def sample(args, device, generative_model, dataset_info,
+def sample(args, device, generative_model, dataset_info, data_in,
            prop_dist=None, nodesxsample=torch.tensor([10]), context=None,
            fix_noise=False):
     max_n_nodes = dataset_info['max_n_nodes']  # this is the maximum node_size in QM9
 
     assert int(torch.max(nodesxsample)) <= max_n_nodes
     batch_size = len(nodesxsample)
+    generate_mask = data_in['generate_flag']
 
-    node_mask = torch.zeros(batch_size, max_n_nodes)
-    for i in range(batch_size):
-        node_mask[i, 0:nodesxsample[i]] = 1
+    # we start with just the correct number of nodes
+    # so node mask becomes generate_mask, critically because all the elements in the batch are the same
+    # we're redoing this. we need to be a bit careful. The mdoel needs to have access to all the 
+    # nodes, but only generate some fraction of them. 
+    # node_mask = torch.zeros(batch_size, max_n_nodes)
+    # for i in range(batch_size):
+    #     node_mask[i, 0:nodesxsample[i]] = 1
 
     # Compute edge_mask
-
-    edge_mask = node_mask.unsqueeze(1) * node_mask.unsqueeze(2)
-    diag_mask = ~torch.eye(edge_mask.size(1), dtype=torch.bool).unsqueeze(0)
+    # node_mask = generate_mask.squeeze(-1)
+    node_mask = data_in['atom_mask']
+    edge_mask = node_mask.unsqueeze(-1) * node_mask.unsqueeze(-2)
+    # edge_mask = node_mask.unsqueeze(1) * node_mask.unsqueeze(2)
+                                        
+    diag_mask = ~torch.eye(edge_mask.size(1), dtype=torch.bool, device=edge_mask.device).unsqueeze(0)
     edge_mask *= diag_mask
-    edge_mask = edge_mask.view(batch_size * max_n_nodes * max_n_nodes, 1).to(device)
+    # max_n_nodes is differentc
+    # edge_mask = edge_mask.view(batch_size * max_n_nodes * max_n_nodes, 1).to(device)
+    edge_mask = edge_mask.view(-1, 1).to(device)
     node_mask = node_mask.unsqueeze(2).to(device)
+
 
     # TODO FIX: This conditioning just zeros.
     if args.context_node_nf > 0:
@@ -136,7 +148,10 @@ def sample(args, device, generative_model, dataset_info,
         context = None
 
     if args.probabilistic_model == 'diffusion':
-        x, h = generative_model.sample(batch_size, max_n_nodes, node_mask, edge_mask, context, fix_noise=fix_noise)
+        x, h = generative_model.sample(batch_size, 
+           max_n_nodes, node_mask, edge_mask, context, 
+           data_in=data_in, fix_noise=fix_noise, generate_mask=generate_mask
+        )
 
         assert_correctly_masked(x, node_mask)
         assert_mean_zero_with_mask(x, node_mask)

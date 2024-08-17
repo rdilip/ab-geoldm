@@ -299,6 +299,10 @@ def main():
     best_nll_val = 1e8
     best_nll_test = 1e8
     for epoch in range(args.start_epoch, args.n_epochs):
+        if epoch == 0:
+            analyze_and_save(args=args, epoch=epoch, loader=dataloaders['test'], model_sample=model_ema, nodes_dist=nodes_dist,
+                             dataset_info=dataset_info, device=device,
+                             prop_dist=prop_dist, samples_per_el=2)        
         start_epoch = time.time()
         train_epoch(args=args, loader=dataloaders['train'], epoch=epoch, model=model, model_dp=model_dp,
                     model_ema=model_ema, ema=ema, device=device, dtype=dtype, property_norms=property_norms,
@@ -312,9 +316,9 @@ def main():
                 # wandb.log(model.log_info(), commit=True)
 
             if not args.break_train_epoch and args.train_diffusion:
-                analyze_and_save(args=args, epoch=epoch, model_sample=model_ema, nodes_dist=nodes_dist,
+                analyze_and_save(args=args, loader=dataloaders['test'], epoch=epoch, model_sample=model_ema, nodes_dist=nodes_dist,
                                  dataset_info=dataset_info, device=device,
-                                 prop_dist=prop_dist, n_samples=args.n_stability_samples)
+                                 prop_dist=prop_dist, samples_per_el=10)
             nll_val = test(args=args, loader=dataloaders['valid'], epoch=epoch, eval_model=model_ema_dp,
                            partition='Val', device=device, dtype=dtype, nodes_dist=nodes_dist,
                            property_norms=property_norms)

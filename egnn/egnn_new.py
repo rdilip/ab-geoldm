@@ -186,14 +186,20 @@ class EGNN(nn.Module):
         distances, _ = coord2diff(x, edge_index)
         if self.sin_embedding is not None:
             distances = self.sin_embedding(distances)
+
+       
+        # rohit: for vae side, this is None, but for CDR side this is not none
         if generate_mask is None:
-            print("no generate mask")
             generate_mask = torch.ones_like(node_mask)
         h = self.embedding(h)
         for i in range(0, self.n_layers):
             h, x = self._modules["e_block_%d" % i](h, x, edge_index, node_mask=node_mask, edge_mask=edge_mask, edge_attr=distances)
 
         # we need to CHECK THIS
+        # NOTE from rohit: when we run the model, we can use all the nodes that aren't masked (i.e., there's a real thing
+        # there). but at generation time, we should only return the nodes that we're trying to generate
+
+        # node_mask[i] = True -> generate_mask[i] = True. But not the other way around.
         x = x * (node_mask * generate_mask)
         # Important, the bias of the last linear might be non-zero
         h = self.embedding_out(h)

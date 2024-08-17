@@ -10,7 +10,20 @@ import qm9.utils as qm9utils
 from qm9 import losses
 import time
 import torch
+from torch.utils.data import DataLoader
 from utils_diffab import batched_diffab_to_geoldm
+from functools import partial
+
+from torchvision.transforms import Compose
+import sys
+sys.path.append('/data/rdilip/diffab')
+
+from diffab.utils.data import PaddingCollate
+from diffab.utils.transforms.mask import MaskSingleCDR
+from diffab.utils.transforms.merge import MergeChains
+from diffab.utils.transforms.patch import PatchAroundAnchor
+
+from optree import tree_map
 
 
 def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dtype, property_norms, optim,
@@ -27,7 +40,6 @@ def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dt
         edge_mask = data['edge_mask'].to(device, dtype)
         one_hot = data['one_hot'].to(device, dtype)
         charges = (data['charges'] if args.include_charges else torch.zeros(0)).to(device, dtype)
-
         generate_mask = data['generate_flag'].to(device, dtype) if 'generate_flag' in data else None
 
         x = remove_mean_with_mask(x, node_mask)
@@ -55,11 +67,13 @@ def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dt
         optim.zero_grad()
 
         # transform batch through flow
+        if i == 4841:
+            breakpoint()
         nll, reg_term, mean_abs_z = losses.compute_loss_and_nll(args, model_dp, nodes_dist,
                                                                 x, h, node_mask, edge_mask, context,
                                                                 generate_mask=generate_mask)
         # standard nll from forward KL
-        loss = nll + args.ode_regularization * reg_term
+        loss = nll + args.ode_regularization * reg_term 
         loss.backward()
 
         if args.clip_grad:
@@ -179,28 +193,50 @@ def sample_different_sizes_and_save(model, nodes_dist, args, device, dataset_inf
                           batch_size * counter, name='molecule')
 
 
-def analyze_and_save(epoch, model_sample, nodes_dist, args, device, dataset_info, prop_dist,
-                     n_samples=1000, batch_size=100):
+
+def repeat_func(x, n_repeat):
+    if torch.is_tensor(x):
+        return x.repeat(*([n_repeat] + [1 for _ in range(x.ndim-1)]))
+    return x
+
+# rohit changelog
+# removed n_samples --- just run through diffab test set.
+def analyze_and_save(epoch, loader, model_sample, nodes_dist, args, device, dataset_info, prop_dist, samples_per_el: int=3):
     print(f'Analyzing molecule stability at epoch {epoch}...')
-    batch_size = min(batch_size, n_samples)
-    assert n_samples % batch_size == 0
+    # We can probably fit them all in one batch
+    # this is hacky, i just need to preserve this structure
+    dataset = loader.dataset
+    dataset.transform = Compose([
+        MaskSingleCDR(selection='H3', augmentation=False),
+        MergeChains(),
+        PatchAroundAnchor(),
+    ])
+
+    dl = DataLoader(dataset, batch_size = 1, collate_fn = PaddingCollate(), shuffle=False, num_workers=args.num_workers)
     molecules = {'one_hot': [], 'x': [], 'node_mask': []}
-    for i in range(int(n_samples/batch_size)):
-        nodesxsample = nodes_dist.sample(batch_size)
-        one_hot, charges, x, node_mask = sample(args, device, model_sample, dataset_info, prop_dist,
-                                                nodesxsample=nodesxsample)
+
+    # TODO
+    # insert generate mask + node mask
+    # make relevant metrics...
+    for el in dl:
+        # repeats single batch N times
+        el_repeated = tree_map(partial(repeat_func, n_repeat=samples_per_el), el)
+        el_diffab = batched_diffab_to_geoldm(el_repeated)
+        el_diffab = tree_map(lambda x: x.to(device), el_diffab)
+        nodesxsample = nodes_dist.sample(samples_per_el)
+
+        one_hot, charges, x, node_mask = sample(args, device, model_sample, dataset_info, data_in=el_diffab, prop_dist=prop_dist, nodesxsample=nodesxsample,)
 
         molecules['one_hot'].append(one_hot.detach().cpu())
         molecules['x'].append(x.detach().cpu())
         molecules['node_mask'].append(node_mask.detach().cpu())
 
-    molecules = {key: torch.cat(molecules[key], dim=0) for key in molecules}
-    validity_dict, rdkit_tuple = analyze_stability_for_molecules(molecules, dataset_info)
+        # validity_dict, rdkit_tuple = analyze_stability_for_molecules(molecules, dataset_info)
 
     # wandb.log(validity_dict)
     # if rdkit_tuple is not None:
         # wandb.log({'Validity': rdkit_tuple[0][0], 'Uniqueness': rdkit_tuple[0][1], 'Novelty': rdkit_tuple[0][2]})
-    return validity_dict
+    return molecules
 
 
 def save_and_sample_conditional(args, device, model, prop_dist, dataset_info, epoch=0, id_from=0):
