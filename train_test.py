@@ -23,6 +23,7 @@ from diffab.utils.transforms.mask import MaskSingleCDR
 from diffab.utils.transforms.merge import MergeChains
 from diffab.utils.transforms.patch import PatchAroundAnchor
 
+import numpy as np
 from optree import tree_map
 
 
@@ -67,8 +68,6 @@ def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dt
         optim.zero_grad()
 
         # transform batch through flow
-        if i == 4841:
-            breakpoint()
         nll, reg_term, mean_abs_z = losses.compute_loss_and_nll(args, model_dp, nodes_dist,
                                                                 x, h, node_mask, edge_mask, context,
                                                                 generate_mask=generate_mask)
@@ -128,13 +127,17 @@ def test(args, loader, epoch, eval_model, device, dtype, property_norms, nodes_d
 
         n_iterations = len(loader)
 
+
         for i, data in enumerate(loader):
+            data = batched_diffab_to_geoldm(data)
             x = data['positions'].to(device, dtype)
             batch_size = x.size(0)
             node_mask = data['atom_mask'].to(device, dtype).unsqueeze(2)
             edge_mask = data['edge_mask'].to(device, dtype)
             one_hot = data['one_hot'].to(device, dtype)
             charges = (data['charges'] if args.include_charges else torch.zeros(0)).to(device, dtype)
+            generate_mask = data['generate_flag'].to(device, dtype) if 'generate_flag' in data else None
+            x = remove_mean_with_mask(x, node_mask)
 
             if args.augment_noise > 0:
                 # Add noise eps ~ N(0, augment_noise) around points.
@@ -213,7 +216,7 @@ def analyze_and_save(epoch, loader, model_sample, nodes_dist, args, device, data
     ])
 
     dl = DataLoader(dataset, batch_size = 1, collate_fn = PaddingCollate(), shuffle=False, num_workers=args.num_workers)
-    molecules = {'one_hot': [], 'x': [], 'node_mask': []}
+    molecules = {'one_hot': [], 'x': [], 'node_mask': [], 'aar': [], 'rmsd': []}
 
     # TODO
     # insert generate mask + node mask
@@ -225,17 +228,28 @@ def analyze_and_save(epoch, loader, model_sample, nodes_dist, args, device, data
         el_diffab = tree_map(lambda x: x.to(device), el_diffab)
         nodesxsample = nodes_dist.sample(samples_per_el)
 
-        one_hot, charges, x, node_mask = sample(args, device, model_sample, dataset_info, data_in=el_diffab, prop_dist=prop_dist, nodesxsample=nodesxsample,)
+        one_hot, charges, x, node_mask = sample(
+            args, device, model_sample, dataset_info, data_in=el_diffab, prop_dist=prop_dist, nodesxsample=nodesxsample,
+        )
+
+        generate_flag = el_diffab['generate_flag']
 
         molecules['one_hot'].append(one_hot.detach().cpu())
         molecules['x'].append(x.detach().cpu())
         molecules['node_mask'].append(node_mask.detach().cpu())
 
-        # validity_dict, rdkit_tuple = analyze_stability_for_molecules(molecules, dataset_info)
+        # compute metrics: AAR and RMSD
+        pred_aa = one_hot.argmax(-1, keepdim=True) * generate_flag
+        gt_aa = el_diffab['one_hot'].argmax(-1, keepdim=True) * generate_flag
+        n_correct = ((gt_aa == pred_aa) * generate_flag).sum()
+        aar = (n_correct / generate_flag.sum()).item()
+        molecules['aar'].append(aar)
 
-    # wandb.log(validity_dict)
-    # if rdkit_tuple is not None:
-        # wandb.log({'Validity': rdkit_tuple[0][0], 'Uniqueness': rdkit_tuple[0][1], 'Novelty': rdkit_tuple[0][2]})
+        print(np.mean(molecules['aar']))
+    try:
+        print(np.mean(molecules['aar']))
+    except:
+        breakpoint()
     return molecules
 
 

@@ -30,6 +30,9 @@ from diffab.datasets import get_dataset
 from diffab.utils.data import PaddingCollate
 cfg = yaml.safe_load(open('/data/rdilip/diffab/configs/test/codesign_single.yml'))
 
+import random
+import numpy as np
+
 def inf_iterator(iterable):
     iterator = iterable.__iter__()
     while True:
@@ -169,10 +172,20 @@ parser.add_argument('--normalization_factor', type=float, default=1,
                     help="Normalize the sum aggregation of EGNN")
 parser.add_argument('--aggregation_method', type=str, default='sum',
                     help='"sum" or "mean"')
+
+
+parser.add_argument('--seed', type=int, default=0)
+
 args = parser.parse_args()
 # dataset_info = get_dataset_info(args.dataset, args.remove_h)
 import pickle
 dataset_info = pickle.load(open('ds_info.pkl', 'rb'))
+
+# rohit add
+print(f"seed is {args.seed}")
+random.seed(args.seed)
+np.random.seed(args.seed)
+torch.manual_seed(args.seed)
 
 
 # args, unparsed_args = parser.parse_known_args()
@@ -300,9 +313,9 @@ def main():
     best_nll_test = 1e8
     for epoch in range(args.start_epoch, args.n_epochs):
         if epoch == 0:
-            analyze_and_save(args=args, epoch=epoch, loader=dataloaders['test'], model_sample=model_ema, nodes_dist=nodes_dist,
+            analyze_and_save(args=args, loader=dataloaders['test'], epoch=epoch, model_sample=model_ema, nodes_dist=nodes_dist,
                              dataset_info=dataset_info, device=device,
-                             prop_dist=prop_dist, samples_per_el=2)        
+                             prop_dist=prop_dist, samples_per_el=10)
         start_epoch = time.time()
         train_epoch(args=args, loader=dataloaders['train'], epoch=epoch, model=model, model_dp=model_dp,
                     model_ema=model_ema, ema=ema, device=device, dtype=dtype, property_norms=property_norms,
@@ -319,9 +332,9 @@ def main():
                 analyze_and_save(args=args, loader=dataloaders['test'], epoch=epoch, model_sample=model_ema, nodes_dist=nodes_dist,
                                  dataset_info=dataset_info, device=device,
                                  prop_dist=prop_dist, samples_per_el=10)
-            nll_val = test(args=args, loader=dataloaders['valid'], epoch=epoch, eval_model=model_ema_dp,
-                           partition='Val', device=device, dtype=dtype, nodes_dist=nodes_dist,
-                           property_norms=property_norms)
+            # nll_val = test(args=args, loader=dataloaders['valid'], epoch=epoch, eval_model=model_ema_dp,
+            #                partition='Val', device=device, dtype=dtype, nodes_dist=nodes_dist,
+            #                property_norms=property_norms)
             nll_test = test(args=args, loader=dataloaders['test'], epoch=epoch, eval_model=model_ema_dp,
                             partition='Test', device=device, dtype=dtype,
                             nodes_dist=nodes_dist, property_norms=property_norms)

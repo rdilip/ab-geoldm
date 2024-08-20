@@ -311,8 +311,8 @@ class EnVariationalDiffusion(torch.nn.Module):
                 f'large with sigma_0 {sigma_0:.5f} and '
                 f'1 / norm_value = {1. / max_norm_value}')
 
-    def phi(self, x, t, node_mask, edge_mask, context, generate_mask):
-        net_out = self.dynamics._forward(t, x, node_mask, edge_mask, context, generate_mask=generate_mask)
+    def phi(self, x, t, node_mask, edge_mask, context, generate_mask, debug=False):
+        net_out = self.dynamics._forward(t, x, node_mask, edge_mask, context, generate_mask=generate_mask, debug=debug)
 
         return net_out
 
@@ -727,10 +727,13 @@ class EnVariationalDiffusion(torch.nn.Module):
 
         return neg_log_pxh
 
-    def sample_p_zs_given_zt(self, s, t, zt, node_mask, edge_mask, context, fix_noise=False, generate_mask=None):
+    def sample_p_zs_given_zt(self, s, t, zt, node_mask, edge_mask, context, *, generate_mask, fix_noise=False):
         """Samples from zs ~ p(zs | zt). Only used during sampling.
         At sample time, we don't have masking from "virtual" nodes. However, we DO have masking stemming from the 
         fact that we are only generating a subsequence.  
+
+        This sample method should only sample the CDR region defined by generate mask. So we'll need to 
+        add the fixed framework latents back at each step. 
         """
         gamma_s = self.gamma(s)
         gamma_t = self.gamma(t)
@@ -753,22 +756,27 @@ class EnVariationalDiffusion(torch.nn.Module):
         # diffusion_utils.assert_mean_zero_with_mask(zt[:, :, :self.n_dims], node_mask)
         # diffusion_utils.assert_mean_zero_with_mask(eps_t[:, :, :self.n_dims], node_mask)
 
-        diffusion_utils.assert_mean_zero_with_mask(zt[:, :, :self.n_dims], generate_mask)
+        # zt is not mean 0 over generate mask, because we have the framework region as a latent
+        # context.
+        
+        diffusion_utils.assert_mean_zero_with_mask(zt[:, :, :self.n_dims], node_mask)
         diffusion_utils.assert_mean_zero_with_mask(eps_t[:, :, :self.n_dims], generate_mask)
 
 
+        # mask out all the framework latents
+        zt = zt * generate_mask
         mu = zt / alpha_t_given_s - (sigma2_t_given_s / alpha_t_given_s / sigma_t) * eps_t
 
         # Compute sigma for p(zs | zt).
         sigma = sigma_t_given_s * sigma_s / sigma_t
 
         # Sample zs given the paramters derived from zt.
-        zs = self.sample_normal(mu, sigma, node_mask, fix_noise)
+        zs = self.sample_normal(mu, sigma, generate_mask, fix_noise)
 
         # Project down to avoid numerical runaway of the center of gravity.
         zs = torch.cat(
             [diffusion_utils.remove_mean_with_mask(zs[:, :, :self.n_dims],
-                                                   node_mask),
+                                                   generate_mask),
              zs[:, :, self.n_dims:]], dim=2
         )
         return zs
@@ -787,13 +795,24 @@ class EnVariationalDiffusion(torch.nn.Module):
         return z
 
     @torch.no_grad()
-    def sample(self, n_samples, n_nodes, node_mask, edge_mask, context, *, zh_framework, data_in, fix_noise=False, generate_mask=None):
+    def sample(
+        self, n_samples, n_nodes, node_mask, edge_mask, context, 
+        *, zh_framework, data_in, fix_noise=False, generate_mask=None,
+        tag=None
+    ):
         """
         Draw samples from the generative model.
         """
 
         if generate_mask is None:
             raise ValueError("At sample time you need a generate mask you muppet")
+
+        # node mask is all real nodes
+        # generate_mask is all noodes we want to generate
+        # everything other
+        framework_mask = (~generate_mask) * node_mask 
+        assert torch.allclose(node_mask, framework_mask | generate_mask)
+        
 
         # node mask is generate mask.
         # TODO: you need to integrate the noised bits in here.
@@ -811,8 +830,7 @@ class EnVariationalDiffusion(torch.nn.Module):
         # get rid of noise for framework
 
         # todo add some asserts
-        z = (zh_framework * ~node_mask) + (z * node_mask)  
-        zstart = z.clone()
+        z = zh_framework * framework_mask + z * generate_mask
 
         # Iteratively sample p(z_s | z_t) for t = 1, ..., T, with s = t - 1.
         for s in reversed(range(0, self.T)):
@@ -823,24 +841,24 @@ class EnVariationalDiffusion(torch.nn.Module):
 
             # as long as node mask is set to generate mask, it shouldn't mess with the 
             # framework region?
-            try:
-                z = self.sample_p_zs_given_zt(s_array, t_array, z, node_mask, edge_mask, context, generate_mask=generate_mask, fix_noise=fix_noise)
-            except:
-                breakpoint()
+            print(f'{tag if tag else ""}: {s}', end='\r')
+            z = self.sample_p_zs_given_zt(s_array, t_array, z, node_mask, edge_mask, context, generate_mask=generate_mask, fix_noise=fix_noise)
             # this is definitely my work -- but why tf did you do this. no clue what this assert is trying to do.
             # assert torch.allclose(z[~node_mask], zstart[~node_mask])
-
+            # that was just the CDR latents, so let's sample the rest
+            z = (zh_framework * framework_mask) + (z * generate_mask)  
 
         # Finally sample p(x, h | z_0).
-        x, h = self.sample_p_xh_given_z0(z, node_mask, edge_mask, context, fix_noise=fix_noise)
+        x, h = self.sample_p_xh_given_z0(z, node_mask, edge_mask, context, generate_mask=generate_mask, fix_noise=fix_noise)
 
-        diffusion_utils.assert_mean_zero_with_mask(x, node_mask)
+        # diffusion_utils.assert_mean_zero_with_mask(x, node_mask)
+        diffusion_utils.assert_mean_zero_with_mask(x, generate_mask)
 
         max_cog = torch.sum(x, dim=1, keepdim=True).abs().max().item()
         if max_cog > 5e-2:
             print(f'Warning cog drift with error {max_cog:.3f}. Projecting '
                   f'the positions down.')
-            x = diffusion_utils.remove_mean_with_mask(x, node_mask)
+            x = diffusion_utils.remove_mean_with_mask(x, generate_mask)
 
         return x, h
 
@@ -1146,19 +1164,37 @@ class EnLatentDiffusion(EnVariationalDiffusion):
 
         return degrees_of_freedom_h * (- log_sigma_x - 0.5 * np.log(2 * np.pi))
 
-    def sample_p_xh_given_z0(self, z0, node_mask, edge_mask, context, fix_noise=False):
-        """Samples x ~ p(x|z0)."""
+    def sample_p_xh_given_z0(self, z0, node_mask, edge_mask, context, *, generate_mask, fix_noise=False):
+        """Samples x ~ p(x|z0).
+        This should match generate mask. But remember z0 contains latents.
+        """
+
+        framework_mask = node_mask * (~generate_mask)
+        assert torch.allclose(node_mask, framework_mask | generate_mask)
+
         zeros = torch.zeros(size=(z0.size(0), 1), device=z0.device)
         gamma_0 = self.gamma(zeros)
         # Computes sqrt(sigma_0^2 / alpha_0^2)
         sigma_x = self.SNR(-0.5 * gamma_0).unsqueeze(1)
-        net_out = self.phi(z0, zeros, node_mask, edge_mask, context)
+
+        # this should just have generate CDR region
+
+        # reference
+        # def phi(self, x, t, node_mask, edge_mask, context, generate_mask):
+        net_out = self.phi(z0, zeros, node_mask, edge_mask, context, generate_mask=generate_mask, debug=False)
 
         # Compute mu for p(zs | zt).
-        mu_x = self.compute_x_pred(net_out, z0, gamma_0)
-        xh = self.sample_normal(mu=mu_x, sigma=sigma_x, node_mask=node_mask, fix_noise=fix_noise)
+        # same for this one
 
+        # mu_x is NOT masked, so we need to mask out the framework region
+        
+        mu_x = self.compute_x_pred(net_out, z0, gamma_0)
+        mu_x = mu_x * generate_mask
+        # xh = self.sample_normal(mu=mu_x, sigma=sigma_x, node_mask=node_mask, fix_noise=fix_noise)
+        xh = self.sample_normal(mu=mu_x, sigma=sigma_x, node_mask=generate_mask, fix_noise=fix_noise)
         x = xh[:, :, :self.n_dims]
+
+        diffusion_utils.assert_mean_zero_with_mask(x, generate_mask)
 
         # h_int = z0[:, :, -1:] if self.include_charges else torch.zeros(0).to(z0.device)
         # x, h_cat, h_int = self.unnormalize(x, z0[:, :, self.n_dims:-1], h_int, node_mask)

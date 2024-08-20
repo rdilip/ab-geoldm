@@ -46,7 +46,7 @@ class EGNN_dynamics_QM9(nn.Module):
     def unwrap_forward(self):
         return self._forward
 
-    def _forward(self, t, xh, node_mask, edge_mask, context, generate_mask):
+    def _forward(self, t, xh, node_mask, edge_mask, context, generate_mask, debug=False):
         bs, n_nodes, dims = xh.shape
         h_dims = dims - self.n_dims
         edges = self.get_adj_matrix(n_nodes, bs, self.device)
@@ -117,10 +117,14 @@ class EGNN_dynamics_QM9(nn.Module):
         # remove mean just from generate_mask. everything else shoudl be zeor anyway
         # it gets projected so this will be fine.
         assert torch.isclose((vel * (1- generate_mask.view(bs, n_nodes, 1).to(int))).abs().max(), torch.tensor(0.0))
+
+
+
         vel = remove_mean_with_mask(vel, generate_mask.view(bs, n_nodes, 1))
         # Rohit added this
-        vel = vel * generate_mask.view(bs, n_nodes, -1)
 
+
+        vel = vel * generate_mask.view(bs, n_nodes, -1)
         if h_dims == 0:
             return vel
         else:
