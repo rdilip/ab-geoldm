@@ -38,7 +38,6 @@ def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dt
     nll_epoch = []
     n_iterations = len(loader)
 
-    breakpoint()
     for i, data in enumerate(loader):
         data = batched_diffab_to_geoldm(data)
         x = data['positions'].to(device, dtype)
@@ -264,16 +263,16 @@ def analyze_and_save(epoch, loader, model_sample, nodes_dist, args, device, data
     dl = DataLoader(dataset, batch_size=1, collate_fn=PaddingCollate(), shuffle=False, num_workers=args.num_workers)
 
     n_devices = torch.cuda.device_count()
-    torch.cuda.set_sync_debug_mode('warn')
+    # torch.cuda.set_sync_debug_mode('warn')
     # model_sample.share_memory()
 
     processes = []
     results = mp.Manager().dict()
 
     for m, el in enumerate(dl):
-        if m > 4:
-            continue
         print(f"Starting process {m} on device {m % n_devices}")
+        if m > 3:
+            continue
         device = f'cuda:{m % n_devices}'
         p = mp.Process(target=parallel_sampling_func, 
                        args=(m, el, device, model_sample.to(device), results, nodes_dist, args, dataset_info, prop_dist, samples_per_el))
@@ -283,8 +282,10 @@ def analyze_and_save(epoch, loader, model_sample, nodes_dist, args, device, data
     for p in processes:
         p.join()
 
-    print("All processes joined.")
-    return results
+    print("Average aar: ",  np.mean([res['aar'] for res in results.values()]))
+    results_dict = dict(results)
+    del results
+    return results_dict
 
 def save_and_sample_conditional(args, device, model, prop_dist, dataset_info, epoch=0, id_from=0):
     one_hot, charges, x, node_mask = sample_sweep_conditional(args, device, model, dataset_info, prop_dist)

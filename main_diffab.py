@@ -62,7 +62,7 @@ cfg_train.summary_path = '/data/rdilip/diffab/data/sabdab_summary_all.tsv'
 
 ds_train = get_dataset(cfg_train)
 ds_train.transform = Compose([
-    MaskSingleCDR(augmentation=True, selection='H3'),
+    MaskSingleCDR(augmentation=True),
     MergeChains(),
     PatchAroundAnchor()
 ])
@@ -321,19 +321,11 @@ def main():
         model_ema = model
         model_ema_dp = model_dp
 
-    best_nll_val = 1e8
     best_nll_test = 1e8
     for epoch in range(args.start_epoch, args.n_epochs):
-        if epoch == 0:
-            # run once at start to test
-            nll_test = test(args=args, loader=dataloaders['test'], epoch=epoch, eval_model=model_ema_dp,
-                            partition='Test', device=device, dtype=dtype,
-                            nodes_dist=nodes_dist, property_norms=property_norms)
-
-            results = analyze_and_save(args=args, loader=dataloaders['test'], epoch=epoch, model_sample=model_ema, nodes_dist=nodes_dist,
-                             dataset_info=dataset_info, device=device,
-                             prop_dist=prop_dist, samples_per_el=10)
         start_epoch = time.time()
+
+        # analyze_and_save 
         train_epoch(args=args, loader=dataloaders['train'], epoch=epoch, model=model, model_dp=model_dp,
                     model_ema=model_ema, ema=ema, device=device, dtype=dtype, property_norms=property_norms,
                     nodes_dist=nodes_dist, dataset_info=dataset_info,
@@ -349,6 +341,10 @@ def main():
                 analyze_and_save(args=args, loader=dataloaders['test'], epoch=epoch, model_sample=model_ema, nodes_dist=nodes_dist,
                                  dataset_info=dataset_info, device=device,
                                  prop_dist=prop_dist, samples_per_el=10)
+                # analyze and save moves model_ema all over the place, so we need to make sure it's on a consistent
+                # device before we do anything in future. 
+                model_ema = model_ema.to(device)
+
             # nll_val = test(args=args, loader=dataloaders['valid'], epoch=epoch, eval_model=model_ema_dp,
             #                partition='Val', device=device, dtype=dtype, nodes_dist=nodes_dist,
             #                property_norms=property_norms)
@@ -356,8 +352,9 @@ def main():
                             partition='Test', device=device, dtype=dtype,
                             nodes_dist=nodes_dist, property_norms=property_norms)
 
-            if nll_val < best_nll_val:
-                best_nll_val = nll_val
+            # if nll_val < best_nll_val:
+            if nll_test < best_nll_test:
+                # best_nll_val = nll_val
                 best_nll_test = nll_test
                 if args.save_model:
                     args.current_epoch = epoch + 1
@@ -375,8 +372,9 @@ def main():
                         utils.save_model(model_ema, 'outputs/%s/generative_model_ema_%d.npy' % (args.exp_name, epoch))
                     with open('outputs/%s/args_%d.pickle' % (args.exp_name, epoch), 'wb') as f:
                         pickle.dump(args, f)
-            print('Val loss: %.4f \t Test loss:  %.4f' % (nll_val, nll_test))
-            print('Best val loss: %.4f \t Best test loss:  %.4f' % (best_nll_val, best_nll_test))
+            # print('Val loss: %.4f \t Test loss:  %.4f' % (nll_val, nll_test))
+            # print('Best val loss: %.4f \t Best test loss:  %.4f' % (best_nll_val, best_nll_test))
+            print('\t Best test loss:  %.4f \t current test loss: %.4f' % (best_nll_test, nll_test))
             # wandb.log({"Val loss ": nll_val}, commit=True)
             # wandb.log({"Test loss ": nll_test}, commit=True)
             # wandb.log({"Best cross-validated test loss ": best_nll_test}, commit=True)
