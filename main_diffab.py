@@ -15,6 +15,7 @@ from equivariant_diffusion import en_diffusion
 from equivariant_diffusion.utils import assert_correctly_masked
 from equivariant_diffusion import utils as flow_utils
 import torch
+from torchvision.transforms import Compose
 import time
 import pickle
 # from qm9.utils import prepare_context, compute_mean_mad
@@ -28,6 +29,9 @@ sys.path.append('/data/rdilip/diffab/')
 import yaml
 from diffab.datasets import get_dataset
 from diffab.utils.data import PaddingCollate
+from diffab.utils.transforms.mask import MaskSingleCDR
+from diffab.utils.transforms.merge import MergeChains
+from diffab.utils.transforms.patch import PatchAroundAnchor
 cfg = yaml.safe_load(open('/data/rdilip/diffab/configs/test/codesign_single.yml'))
 
 import random
@@ -57,8 +61,17 @@ cfg_train.chothia_dir = '/data/rdilip/diffab/data/all_structures/chothia'
 cfg_train.summary_path = '/data/rdilip/diffab/data/sabdab_summary_all.tsv'
 
 ds_train = get_dataset(cfg_train)
+ds_train.transform = Compose([
+    MaskSingleCDR(augmentation=True, selection='H3'),
+    MergeChains(),
+    PatchAroundAnchor()
+])
 ds_test = get_dataset(cfg_test)
-
+ds_test.transform = Compose([
+    MaskSingleCDR(augmentation=False, selection='H3'),
+    MergeChains(),
+    PatchAroundAnchor()
+])
 ####################### END DIFFAB HACK #######################################
 
 parser = argparse.ArgumentParser(description='E3Diffusion')
@@ -248,8 +261,6 @@ dataloaders = {
                     shuffle=False, num_workers=args.num_workers, )
 }
 
-data_dummy = next(iter(dataloaders['train']))
-
 # no conditioning
 context_node_nf = 0
 property_norms = None
@@ -259,6 +270,7 @@ args.context_node_nf = context_node_nf
 if args.train_diffusion:
     model, nodes_dist, prop_dist = get_latent_diffusion(args, device, dataset_info, dataloaders['train'])
 else:
+    print("Training autoencoder!")
     model, nodes_dist, prop_dist = get_autoencoder(args, device, dataset_info, dataloaders['train'])
 
 if prop_dist is not None:
@@ -313,7 +325,12 @@ def main():
     best_nll_test = 1e8
     for epoch in range(args.start_epoch, args.n_epochs):
         if epoch == 0:
-            analyze_and_save(args=args, loader=dataloaders['test'], epoch=epoch, model_sample=model_ema, nodes_dist=nodes_dist,
+            # run once at start to test
+            nll_test = test(args=args, loader=dataloaders['test'], epoch=epoch, eval_model=model_ema_dp,
+                            partition='Test', device=device, dtype=dtype,
+                            nodes_dist=nodes_dist, property_norms=property_norms)
+
+            results = analyze_and_save(args=args, loader=dataloaders['test'], epoch=epoch, model_sample=model_ema, nodes_dist=nodes_dist,
                              dataset_info=dataset_info, device=device,
                              prop_dist=prop_dist, samples_per_el=10)
         start_epoch = time.time()

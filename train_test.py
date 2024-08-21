@@ -13,6 +13,7 @@ import torch
 from torch.utils.data import DataLoader
 from utils_diffab import batched_diffab_to_geoldm
 from functools import partial
+from copy import deepcopy
 
 from torchvision.transforms import Compose
 import sys
@@ -22,9 +23,12 @@ from diffab.utils.data import PaddingCollate
 from diffab.utils.transforms.mask import MaskSingleCDR
 from diffab.utils.transforms.merge import MergeChains
 from diffab.utils.transforms.patch import PatchAroundAnchor
-
 import numpy as np
 from optree import tree_map
+
+
+import torch.multiprocessing as mp
+mp.set_start_method('spawn', force=True)
 
 
 def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dtype, property_norms, optim,
@@ -34,6 +38,7 @@ def train_epoch(args, loader, epoch, model, model_dp, model_ema, ema, device, dt
     nll_epoch = []
     n_iterations = len(loader)
 
+    breakpoint()
     for i, data in enumerate(loader):
         data = batched_diffab_to_geoldm(data)
         x = data['positions'].to(device, dtype)
@@ -124,7 +129,6 @@ def test(args, loader, epoch, eval_model, device, dtype, property_norms, nodes_d
     with torch.no_grad():
         nll_epoch = 0
         n_samples = 0
-
         n_iterations = len(loader)
 
 
@@ -136,7 +140,7 @@ def test(args, loader, epoch, eval_model, device, dtype, property_norms, nodes_d
             edge_mask = data['edge_mask'].to(device, dtype)
             one_hot = data['one_hot'].to(device, dtype)
             charges = (data['charges'] if args.include_charges else torch.zeros(0)).to(device, dtype)
-            generate_mask = data['generate_flag'].to(device, dtype) if 'generate_flag' in data else None
+            generate_mask = data['generate_flag'].to(device, dtype)
             x = remove_mean_with_mask(x, node_mask)
 
             if args.augment_noise > 0:
@@ -158,9 +162,12 @@ def test(args, loader, epoch, eval_model, device, dtype, property_norms, nodes_d
             else:
                 context = None
 
+
+
+        # standard nll from forward KL
             # transform batch through flow
             nll, _, _ = losses.compute_loss_and_nll(args, eval_model, nodes_dist, x, h,
-                                                    node_mask, edge_mask, context)
+                                                    node_mask, edge_mask, context, generate_mask=generate_mask)
             # standard nll from forward KL
 
             nll_epoch += nll.item() * batch_size
@@ -204,10 +211,49 @@ def repeat_func(x, n_repeat):
 
 # rohit changelog
 # removed n_samples --- just run through diffab test set.
+
+
+def parallel_sampling_func(
+    idx, el, device, model_shared, results, nodes_dist, args, dataset_info, prop_dist, samples_per_el: int=3   
+):
+    el_repeated = tree_map(partial(repeat_func, n_repeat=samples_per_el), el)
+    el_diffab = batched_diffab_to_geoldm(el_repeated)
+    el_diffab = tree_map(lambda x: x.to(device), el_diffab)
+    nodesxsample = nodes_dist.sample(samples_per_el)
+    model = model_shared.to(device)
+    model.dynamics.device = device
+    model.vae.encoder.device = device
+    model.vae.decoder.device = device
+
+    print(f"starting sample for {idx} on device {device}")
+    one_hot, charges, x, node_mask = sample(
+        args, device, model, dataset_info, data_in=el_diffab, prop_dist=prop_dist, nodesxsample=nodesxsample.to(device),
+    )
+    print(f"ending sample for {idx}")
+
+    generate_flag = el_diffab['generate_flag']
+    pred_aa = one_hot.argmax(-1, keepdim=True) * generate_flag
+    gt_aa = el_diffab['one_hot'].argmax(-1, keepdim=True) * generate_flag
+    n_correct = ((gt_aa == pred_aa) * generate_flag).sum()
+    aar = (n_correct / generate_flag.sum()).item()
+
+    out = {
+        'index': idx,
+        'one_hot': one_hot.detach().cpu(),
+        'x': x.detach().cpu(),
+        'node_mask': node_mask.detach().cpu(),
+        'generate_mask': generate_flag.detach().cpu(),
+        'aar': aar
+    }
+
+    results[idx] = out
+
+
+
+
 def analyze_and_save(epoch, loader, model_sample, nodes_dist, args, device, dataset_info, prop_dist, samples_per_el: int=3):
     print(f'Analyzing molecule stability at epoch {epoch}...')
-    # We can probably fit them all in one batch
-    # this is hacky, i just need to preserve this structure
+
     dataset = loader.dataset
     dataset.transform = Compose([
         MaskSingleCDR(selection='H3', augmentation=False),
@@ -215,43 +261,30 @@ def analyze_and_save(epoch, loader, model_sample, nodes_dist, args, device, data
         PatchAroundAnchor(),
     ])
 
-    dl = DataLoader(dataset, batch_size = 1, collate_fn = PaddingCollate(), shuffle=False, num_workers=args.num_workers)
-    molecules = {'one_hot': [], 'x': [], 'node_mask': [], 'aar': [], 'rmsd': []}
+    dl = DataLoader(dataset, batch_size=1, collate_fn=PaddingCollate(), shuffle=False, num_workers=args.num_workers)
 
-    # TODO
-    # insert generate mask + node mask
-    # make relevant metrics...
-    for el in dl:
-        # repeats single batch N times
-        el_repeated = tree_map(partial(repeat_func, n_repeat=samples_per_el), el)
-        el_diffab = batched_diffab_to_geoldm(el_repeated)
-        el_diffab = tree_map(lambda x: x.to(device), el_diffab)
-        nodesxsample = nodes_dist.sample(samples_per_el)
+    n_devices = torch.cuda.device_count()
+    torch.cuda.set_sync_debug_mode('warn')
+    # model_sample.share_memory()
 
-        one_hot, charges, x, node_mask = sample(
-            args, device, model_sample, dataset_info, data_in=el_diffab, prop_dist=prop_dist, nodesxsample=nodesxsample,
-        )
+    processes = []
+    results = mp.Manager().dict()
 
-        generate_flag = el_diffab['generate_flag']
+    for m, el in enumerate(dl):
+        if m > 4:
+            continue
+        print(f"Starting process {m} on device {m % n_devices}")
+        device = f'cuda:{m % n_devices}'
+        p = mp.Process(target=parallel_sampling_func, 
+                       args=(m, el, device, model_sample.to(device), results, nodes_dist, args, dataset_info, prop_dist, samples_per_el))
+        p.start()
+        processes.append(p)
 
-        molecules['one_hot'].append(one_hot.detach().cpu())
-        molecules['x'].append(x.detach().cpu())
-        molecules['node_mask'].append(node_mask.detach().cpu())
+    for p in processes:
+        p.join()
 
-        # compute metrics: AAR and RMSD
-        pred_aa = one_hot.argmax(-1, keepdim=True) * generate_flag
-        gt_aa = el_diffab['one_hot'].argmax(-1, keepdim=True) * generate_flag
-        n_correct = ((gt_aa == pred_aa) * generate_flag).sum()
-        aar = (n_correct / generate_flag.sum()).item()
-        molecules['aar'].append(aar)
-
-        print(np.mean(molecules['aar']))
-    try:
-        print(np.mean(molecules['aar']))
-    except:
-        breakpoint()
-    return molecules
-
+    print("All processes joined.")
+    return results
 
 def save_and_sample_conditional(args, device, model, prop_dist, dataset_info, epoch=0, id_from=0):
     one_hot, charges, x, node_mask = sample_sweep_conditional(args, device, model, dataset_info, prop_dist)

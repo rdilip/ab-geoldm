@@ -139,6 +139,7 @@ def sample(args, device, generative_model, dataset_info, data_in,
     node_mask = node_mask.unsqueeze(2).to(device)
 
 
+
     # TODO FIX: This conditioning just zeros.
     if args.context_node_nf > 0:
         if context is None:

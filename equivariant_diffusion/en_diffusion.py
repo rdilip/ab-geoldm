@@ -641,10 +641,8 @@ class EnVariationalDiffusion(torch.nn.Module):
             neg_log_constants = torch.zeros_like(neg_log_constants)
 
         # The KL between q(z1 | x) and p(z1) = Normal(0, 1). Should be close to zero.
-        try:
-            kl_prior = self.kl_prior(xh, node_mask * generate_mask)
-        except:
-            breakpoint()
+        assert torch.allclose(generate_mask, generate_mask * node_mask)
+        kl_prior = self.kl_prior(xh, generate_mask)
 
         # Combining the terms
         if t0_always:
@@ -660,10 +658,10 @@ class EnVariationalDiffusion(torch.nn.Module):
 
             # Sample z_0 given x, h for timestep t, from q(z_t | x, h)
             eps_0 = self.sample_combined_position_feature_noise(
-                n_samples=x.size(0), n_nodes=x.size(1), node_mask=node_mask)
+                n_samples=x.size(0), n_nodes=x.size(1), node_mask=generate_mask) #node_mask)
             z_0 = alpha_0 * xh + sigma_0 * eps_0
 
-            net_out = self.phi(z_0, t_zeros, node_mask, edge_mask, context)
+            net_out = self.phi(z_0, t_zeros, node_mask, edge_mask, context, generate_mask=generate_mask)
 
             loss_term_0 = -self.log_pxh_given_z0_without_constants(
                 x, h, z_0, gamma_0, eps_0, net_out, node_mask)
@@ -803,6 +801,7 @@ class EnVariationalDiffusion(torch.nn.Module):
         """
         Draw samples from the generative model.
         """
+        print("sampling from gen model")
 
         if generate_mask is None:
             raise ValueError("At sample time you need a generate mask you muppet")
